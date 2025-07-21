@@ -42,7 +42,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/go-logr/logr"
 	"github.com/rh-ecosystem-edge/kernel-module-management/pkg/labels"
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/utils/ptr"
@@ -81,7 +80,6 @@ const (
 	defaultOcDriversVersion     = "6.2.2"
 	defaultInstallerRepoURL     = "https://repo.radeon.com"
 	defaultInitContainerImage   = "busybox:1.36"
-	defaultBaseImageRegistry    = "docker.io"
 )
 
 var (
@@ -91,6 +89,10 @@ var (
 	buildOcDockerfile string
 	//go:embed devdockerfiles/devdockerfile.txt
 	dockerfileDevTemplateUbuntu string
+	//go:embed dockerfiles/DockerfileTemplate.sles
+	dockerfileTemplatesles string
+	//go:embed devdockerfiles/devdockerfile.txt
+	dockerfileDevTemplatesles string
 )
 
 //go:generate mockgen -source=kmmmodule.go -package=kmmmodule -destination=mock_kmmmodule.go KMMModuleAPI
@@ -204,14 +206,15 @@ func resolveDockerfile(cmName string, devConfig *amdv1alpha1.DeviceConfig) (stri
 			dockerfileTemplate = strings.Replace(dockerfileTemplate, "$$AMDGPU_BUILD", devBuildinfo[2], -1)
 			dockerfileTemplate = strings.Replace(dockerfileTemplate, "$$ROCM_BUILD", devBuildinfo[3], -1)
 		}
-
 		// use an environment variable to ask CI infra to pull image from internal repository
-		// in order to avoid DockerHub pull rate limit issue
+		// in order to avoid docekrhub pull rate limit issue
 		_, isCIEnvSet := os.LookupEnv("CI_ENV")
 		internalUbuntuBaseImage, internalUbuntuBaseSet := os.LookupEnv("INTERNAL_UBUNTU_BASE")
 		if isCIEnvSet && internalUbuntuBaseSet {
-			dockerfileTemplate = strings.Replace(dockerfileTemplate, "$$BASEIMG_REGISTRY/ubuntu:$$VERSION", fmt.Sprintf("%v:$$VERSION", internalUbuntuBaseImage), -1)
+			dockerfileTemplate = strings.Replace(dockerfileTemplate, "ubuntu:$$VERSION", fmt.Sprintf("%v:$$VERSION", internalUbuntuBaseImage), -1)
 		}
+	case "sles":
+		dockerfileTemplate = dockerfileTemplatesles
 	case "coreos":
 		dockerfileTemplate = buildOcDockerfile
 	// FIX ME
@@ -229,13 +232,6 @@ func resolveDockerfile(cmName string, devConfig *amdv1alpha1.DeviceConfig) (stri
 	default:
 		return "", fmt.Errorf("not supported OS: %s", osDistro)
 	}
-	// render base image registry
-	baseImageRegistry := defaultBaseImageRegistry
-	if devConfig.Spec.Driver.ImageBuild.BaseImageRegistry != "" {
-		baseImageRegistry = devConfig.Spec.Driver.ImageBuild.BaseImageRegistry
-	}
-	dockerfileTemplate = strings.Replace(dockerfileTemplate, "$$BASEIMG_REGISTRY", baseImageRegistry, -1)
-	// render driver version
 	resolvedDockerfile := strings.Replace(dockerfileTemplate, "$$VERSION", version, -1)
 	return resolvedDockerfile, nil
 }
@@ -413,7 +409,7 @@ func setKMMModuleLoader(ctx context.Context, mod *kmmv1beta1.Module, devConfig *
 	kmlog := log.FromContext(ctx)
 	kmlog.Info(fmt.Sprintf("isOpenshift %+v", isOpenshift))
 
-	kernelMappings, driversVersion, err := getKernelMappings(kmlog, devConfig, isOpenshift, nodes)
+	kernelMappings, driversVersion, err := getKernelMappings(devConfig, isOpenshift, nodes)
 	if err != nil {
 		return err
 	}
@@ -448,28 +444,23 @@ func setKMMModuleLoader(ctx context.Context, mod *kmmv1beta1.Module, devConfig *
 	mod.Spec.ModuleLoader.ServiceAccountName = "amd-gpu-operator-kmm-module-loader"
 	mod.Spec.ImageRepoSecret = devConfig.Spec.Driver.ImageRegistrySecret
 	mod.Spec.Selector = getNodeSelector(devConfig)
-	mod.Spec.Tolerations = []v1.Toleration{
+	/*mod.Spec.Tolerations = []v1.Toleration{
 		{
 			Key:      "amd-gpu-driver-upgrade",
 			Value:    "true",
 			Operator: v1.TolerationOpEqual,
 			Effect:   v1.TaintEffectNoSchedule,
 		},
-		{
-			Key:      "amd-dcm",
-			Value:    "up",
-			Operator: v1.TolerationOpEqual,
-		},
-	}
+	}*/
 	return nil
 }
 
-func getKernelMappings(kmlog logr.Logger, devConfig *amdv1alpha1.DeviceConfig, isOpenshift bool, nodes *v1.NodeList) ([]kmmv1beta1.KernelMapping, string, error) {
+func getKernelMappings(devConfig *amdv1alpha1.DeviceConfig, isOpenshift bool, nodes *v1.NodeList) ([]kmmv1beta1.KernelMapping, string, error) {
 
 	inTreeModuleToRemove := ""
 
 	if nodes == nil || len(nodes.Items) == 0 {
-		return nil, "", fmt.Errorf("no nodes found for the label selector %s", MapToLabelSelector(devConfig.Spec.Selector))
+		return nil, "", fmt.Errorf("No nodes found for the label selector %s", MapToLabelSelector(devConfig.Spec.Selector))
 	}
 	kernelMappings := []kmmv1beta1.KernelMapping{}
 	kmSet := map[string]bool{}
@@ -477,8 +468,7 @@ func getKernelMappings(kmlog logr.Logger, devConfig *amdv1alpha1.DeviceConfig, i
 	for _, node := range nodes.Items {
 		km, ver, err := getKM(devConfig, node, inTreeModuleToRemove, isOpenshift)
 		if err != nil {
-			kmlog.Error(err, fmt.Sprintf("error constructing a kernel mapping for node: %s", node.Name))
-			continue
+			return nil, driversVersion, fmt.Errorf("error constructing a kernel mapping for node: %s, err: %v", node.Name, err)
 		}
 		if kmSet[km.Literal] {
 			continue
@@ -486,9 +476,6 @@ func getKernelMappings(kmlog logr.Logger, devConfig *amdv1alpha1.DeviceConfig, i
 		kernelMappings = append(kernelMappings, km)
 		kmSet[km.Literal] = true
 		driversVersion = ver
-	}
-	if len(kernelMappings) == 0 {
-		return nil, "", fmt.Errorf("failed to build kernel mapping for any selected node")
 	}
 	return kernelMappings, driversVersion, nil
 }
@@ -569,13 +556,6 @@ func getKM(devConfig *amdv1alpha1.DeviceConfig, node v1.Node, inTreeModuleToRemo
 		},
 	}
 
-	// setup base image registry's TLS config
-	if devConfig.Spec.Driver.ImageBuild.BaseImageRegistryTLS.Insecure != nil {
-		kmmBuild.BaseImageRegistryTLS.Insecure = *devConfig.Spec.Driver.ImageBuild.BaseImageRegistryTLS.Insecure
-	}
-	if devConfig.Spec.Driver.ImageBuild.BaseImageRegistryTLS.InsecureSkipTLSVerify != nil {
-		kmmBuild.BaseImageRegistryTLS.InsecureSkipTLSVerify = *devConfig.Spec.Driver.ImageBuild.BaseImageRegistryTLS.InsecureSkipTLSVerify
-	}
 	_, isCIEnvSet := os.LookupEnv("CI_ENV")
 	if isCIEnvSet {
 		kmmBuild.BaseImageRegistryTLS.Insecure = true
@@ -627,6 +607,8 @@ func GetOSName(node v1.Node, devCfg *amdv1alpha1.DeviceConfig) (string, error) {
 }
 
 var cmNameMappers = map[string]func(fullImageStr string) string{
+	"sles":    slesCMNameMapper,
+	"suse":    slesCMNameMapper,
 	"ubuntu":  ubuntuCMNameMapper,
 	"coreos":  rhelCoreOSNameMapper,
 	"rhel":    rhelCMNameMapper,
@@ -655,7 +637,16 @@ func rhelCoreOSNameMapper(osImageStr string) string {
 	}
 	return "coreos-" + osImageStr
 }
-
+func slesCMNameMapper(osImageStr string) string {
+	// Check if the input contains "SUSE Linux Enterprise Server 15"
+	// Use regex to find the release version
+	re := regexp.MustCompile(`(\d+)\s((SP|sp)\d+)`)
+	matches := re.FindStringSubmatch(osImageStr)
+	if len(matches) > 1 {
+		return fmt.Sprintf("%s-%s%s", "sles", matches[1], matches[2])
+	}
+	return "sles-" + osImageStr
+}
 func ubuntuCMNameMapper(osImageStr string) string {
 	splits := strings.Split(osImageStr, " ")
 	os := splits[0]
