@@ -244,7 +244,7 @@ controllerManager:
 #     The below repo is a pre-built copy of the upstream kmm due to how SLES is handling mount. SLES doesn't have /usr/lib/module like Ubuntu and Rhel. So, /usr/lib/module should be commented from  nmc_reconciler.go file from https://github.com/pensando/kernel-module-management/tree/main/internal/controllers 
       repository: ghcr.io/alex-isv/amd-gpu-operator-sles-kmm-controller
       # -- AMD GPU operator controller manager image tag
-      tag: v2
+      tag: v3
     # -- Image pull policy for AMD GPU operator controller manager pod
     imagePullPolicy: Always
     # -- Image pull secret name for pulling AMD GPU operator controller manager image if registry needs credential to pull image
